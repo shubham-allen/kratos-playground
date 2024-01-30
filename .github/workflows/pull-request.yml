@@ -1,0 +1,111 @@
+on:
+  pull_request:
+    types: [ opened, edited, synchronize, reopened ]
+
+name: Build and Validate the Pull Request
+
+jobs:
+
+  build:
+    name: Build
+    runs-on: self-hosted
+    env:
+      GOPRIVATE: https://github.com/Allen-Career-Institute/go-kratos-sample
+      GH_ACCESS_TOKEN: ${{ secrets.GIT_TOKEN }}
+    strategy:
+      matrix:
+        go-version: [ 1.19 ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal access token.
+          fetch-depth: 0 # otherwise, there would be errors pushing refs to the destination repository.
+
+      - name: Extract branch name
+        shell: bash
+        run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >>$GITHUB_OUTPUT
+        id: extract_branch
+
+      - name: Build
+        run: |
+          git config --global url.https://$GH_ACCESS_TOKEN@github.com/.insteadOf https://github.com/
+          make all
+
+      - name: Run Test
+        run: |
+          git config --global url.https://$GH_ACCESS_TOKEN@github.com/.insteadOf https://github.com/
+          go test -v ./... -covermode=count -coverprofile=coverage.out
+          go test -v ./... -covermode=count -coverprofile=sonar_coverage.out
+
+  coverage:
+    name: Coverage
+    runs-on: self-hosted
+    env:
+      GOPRIVATE: https://github.com/Allen-Career-Institute/go-kratos-sample
+      GH_ACCESS_TOKEN: ${{ secrets.GIT_TOKEN }}
+
+    needs:
+      - build
+    strategy:
+      matrix:
+        go-version: [ 1.19 ]
+    steps:
+
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: .
+          args: >
+            -Dsonar.projectKey=go-kratos-sample
+            -Dsonar.verbose=true
+            -Dsonar.sources=.
+            -Dsonar.exclusions=**/.github/**,**/*_test.go,*.yml,*.yaml,*.proto,Dockerfile,*.md,*.yaml,**/*.pb.go,**/*.pb.*.go,*.mod,*.json,*.out,Makefile,LICENSE,.gitignore
+            -Dsonar.tests=.
+            -Dsonar.test.inclusions=**/*_test.go
+            -Dsonar.go.coverage.reportPaths=sonar_coverage.out
+
+      - name: Sonar Check
+        continue-on-error: true
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Post SonarQube Report ✍
+        id: quality-gate-check
+        uses: phwt/sonarqube-quality-gate-action@v1.3.2
+        if: "!cancelled()"
+        with:
+          sonar-project-key: go-kratos-sample
+          sonar-host-url: ${{ secrets.SONAR_HOST_URL }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+          github-token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Output result
+        run: |
+          echo "${{ steps.quality-gate-check.outputs.project-status }}"
+          echo "${{ steps.quality-gate-check.outputs.quality-gate-result }}"
+
+      - uses: pascalgn/size-label-action@v0.4.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
+          # Ignore generated files.
+          IGNORED: |
+            **/go.sum
+            docs/**/*
+        with:
+          sizes: |
+            {
+              "10": "XS",
+              "50": "S",
+              "100": "M",
+              "200": "L",
+              "800": "XL",
+              "2000": "XXL"
+            }
